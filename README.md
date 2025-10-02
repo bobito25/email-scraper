@@ -24,7 +24,7 @@ A Python-based tool that scrapes websites to collect email addresses. Given a st
 
 ### 1. Clone the repository:
 ```bash
-git clone https://github.com/AdrianTomin/email-scraper.git
+git clone https://github.com/bobito25/email-scraper.git
 cd email-scraper
 ```
 

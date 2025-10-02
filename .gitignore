@@ -1,0 +1,6 @@
+__pycache__/
+
+.venv/
+
+emails.txt
+cleaned_emails.txt

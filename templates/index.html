@@ -833,7 +833,7 @@
                     <h3>Path components</h3>
                     <ul class="component-stat-list" id="component-stats-list"></ul>
                     <p class="empty-message" id="component-stats-empty">No path component stats yet.</p>
-                    <p class="help-text" id="component-stats-help">Most frequent path segments are listed; entries with zero collected emails are highlighted.</p>
+                    <p class="help-text" id="component-stats-help">Most frequent path segments are listed; entries with zero collected emails and at least 15 URLs are highlighted.</p>
                 </div>
             </div>
         </section>
@@ -1298,7 +1298,7 @@
                 limitedEntries.forEach((entry) => {
                     const item = document.createElement("li");
                     item.className = "component-stat-item";
-                    if (entry.emailCount === 0) {
+                    if (entry.emailCount === 0 && entry.urlCount >= 15) {
                         item.classList.add("zero-emails");
                     }
 

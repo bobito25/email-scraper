@@ -19,7 +19,7 @@ app = Flask(__name__)
 
 
 def parse_exclude_terms(raw_exclude: str) -> Optional[list[str]]:
-	tokens = [token.strip() for token in re.split(r"[\s,]+", raw_exclude) if token.strip()]
+	tokens = [token.strip().lower() for token in re.split(r"[\s,]+", raw_exclude) if token.strip()]
 	return tokens or None
 
 

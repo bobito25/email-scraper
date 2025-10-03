@@ -557,6 +557,10 @@
                         <label for="max_pages" class="form-label">Max pages</label>
                         <input type="number" class="form-control" id="max_pages" name="max_pages" value="{{ form_values.max_pages }}" min="1" max="1000">
                     </div>
+                    <div class="form-group">
+                        <label for="concurrency" class="form-label">Concurrent requests</label>
+                        <input type="number" class="form-control" id="concurrency" name="concurrency" value="{{ form_values.concurrency }}" min="1" max="16">
+                    </div>
                     <div class="form-group checkbox-group">
                         <label for="allow_external" class="form-label">External domains</label>
                         <label class="checkbox" for="allow_external">
@@ -640,6 +644,16 @@
                     <div>
                         Emails found
                         <strong id="job-total">{% if job %}{{ job.unique_emails }}{% else %}0{% endif %}</strong>
+                    </div>
+                    <div>
+                        Concurrency
+                        <strong id="job-concurrency">
+                            {% if job and job.form_values %}
+                                ×{{ job.form_values.get('concurrency', form_values.concurrency) }}
+                            {% else %}
+                                ×{{ form_values.concurrency }}
+                            {% endif %}
+                        </strong>
                     </div>
                     <div>
                         Last fetch
@@ -784,6 +798,7 @@
             const pagesInfo = document.getElementById("job-pages");
             const queueInfo = document.getElementById("job-queue");
             const totalInfo = document.getElementById("job-total");
+            const concurrencyInfo = document.getElementById("job-concurrency");
             const currentUrl = document.getElementById("job-current-url");
             const cancelButton = document.getElementById("cancel-button");
             const validList = document.getElementById("valid-email-list");
@@ -821,6 +836,9 @@
                 }
                 if (!job.email_sources || typeof job.email_sources !== "object") {
                     job.email_sources = {};
+                }
+                if (!job.form_values || typeof job.form_values !== "object") {
+                    job.form_values = {};
                 }
                 return job;
             };
@@ -1194,6 +1212,12 @@
                 const processed = job.processed_count ?? 0;
                 const maxPages = job.max_pages ?? 0;
                 const totalEmails = job.unique_emails ?? 0;
+                const rawConcurrency = Number.isFinite(job.concurrency)
+                    ? job.concurrency
+                    : Number.parseInt(job.form_values?.concurrency, 10);
+                const concurrencyValue = Number.isFinite(rawConcurrency) && rawConcurrency > 0
+                    ? rawConcurrency
+                    : 1;
                 const ratio = typeof job.progress_ratio === "number" && Number.isFinite(job.progress_ratio)
                     ? Math.max(0, Math.min(1, job.progress_ratio))
                     : (maxPages > 0 ? Math.max(0, Math.min(1, processed / maxPages)) : 0);
@@ -1217,6 +1241,9 @@
                 }
                 if (totalInfo) {
                     totalInfo.textContent = `${totalEmails}`;
+                }
+                if (concurrencyInfo) {
+                    concurrencyInfo.textContent = `×${concurrencyValue}`;
                 }
                 const timing = job.timing ?? {};
                 setTimingValue(timingLastFetch, timing.last_fetch_time);

@@ -54,6 +54,7 @@ class ScrapeJob:
 	stay_in_domain: bool
 	exclude_terms: Optional[list[str]]
 	timeout: float
+	concurrency: int
 	form_values: dict[str, Any]
 	status: str = "pending"
 	processed_count: int = 0
@@ -195,6 +196,7 @@ class ScrapeJob:
 				"source_url": self.source_url,
 				"processed_count": self.processed_count,
 				"max_pages": self.max_pages,
+				"concurrency": self.concurrency,
 				"queued_count": self.queued_count,
 				"unique_emails": self.unique_emails,
 				"current_url": self.current_url,
@@ -281,6 +283,7 @@ def execute_job(job: ScrapeJob) -> None:
 			output_file=None,
 			progress_callback=job.apply_progress,
 			cancellation_event=job.cancel_event,
+			concurrency=job.concurrency,
 		)
 		job.finalize(emails)
 	except ScrapeCancelled:
@@ -302,6 +305,7 @@ def index():
 		"max_pages": 100,
 		"allow_external": False,
 		"exclude": "",
+		"concurrency": 1,
 	}
 
 	form_values = dict(form_defaults)
@@ -325,6 +329,14 @@ def index():
 		form_values["exclude"] = exclude_terms_raw
 		exclude_terms = parse_exclude_terms(exclude_terms_raw)
 
+		concurrency_raw = request.form.get("concurrency", str(form_defaults["concurrency"]))
+		try:
+			concurrency = max(1, min(int(concurrency_raw), 16))
+		except (TypeError, ValueError):
+			concurrency = form_defaults["concurrency"]
+			errors.append("Concurrency must be a number; falling back to default.")
+		form_values["concurrency"] = concurrency
+
 		if not domain:
 			errors.append("Please provide a website domain or URL.")
 		else:
@@ -336,6 +348,7 @@ def index():
 				stay_in_domain=not allow_external,
 				exclude_terms=exclude_terms,
 				timeout=10.0,
+				concurrency=concurrency,
 				form_values=form_values.copy(),
 			)
 			register_job(job)

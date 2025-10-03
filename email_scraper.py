@@ -27,18 +27,6 @@ def get_base_url(url: str) -> str:
     return '{0.scheme}://{0.netloc}'.format(parts)
 
 
-def get_page_path(url: str) -> str:
-    """
-    Extracts the page path from the given URL, used to normalize relative links.
-
-    :param url: The full URL from which to extract the page path.
-    :return: The page path (URL up to the last '/').
-    """
-
-    parts = urllib.parse.urlsplit(url)
-    return url[:url.rfind('/') + 1] if '/' in parts.path else url
-
-
 def extract_emails(response_text: str) -> set[str]:
     """
     Extracts all email addresses from the provided HTML text.
@@ -49,23 +37,6 @@ def extract_emails(response_text: str) -> set[str]:
 
     email_pattern = r'[a-z0-9\.\-+]+@[a-z0-9\.\-+]+\.[a-z]+'
     return set(re.findall(email_pattern, response_text, re.I))
-
-
-def normalize_link(link: str, base_url: str, page_path: str) -> str:
-    """
-    Normalizes relative links into absolute URLs.
-
-    :param link: The link to normalize (could be relative or absolute).
-    :param base_url: The base URL for relative links starting with '/'.
-    :param page_path: The page path for relative links not starting with '/'.
-    :return: The normalized link as an absolute URL.
-    """
-
-    if link.startswith('/'):
-        return base_url + link
-    elif not link.startswith('http'):
-        return page_path + link
-    return link
 
 
 ScrapeStatus = Literal['started', 'running', 'error', 'finished', 'cancelled']
@@ -171,7 +142,8 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
                    progress_callback: Optional[ProgressCallback] = None,
                    min_request_interval: float = 0.5, max_retries: int = 3,
                    backoff_factor: float = 1.5,
-                   cancellation_event: Optional[threading.Event] = None) -> set[str]:
+                   cancellation_event: Optional[threading.Event] = None,
+                   concurrency: int = 1) -> set[str]:
     """
     Scrapes a website starting from the given URL, follows links, and collects email addresses.
     Optionally appends newly found (deduplicated) emails to an output file in a thread-safe way.
@@ -188,6 +160,7 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
     :param max_retries: Maximum retries for transient errors including HTTP 429 (default: 3).
     :param backoff_factor: Multiplier used when calculating exponential backoff delays (default: 1.5).
     :param cancellation_event: Optional event used to cancel the scraping process.
+    :param concurrency: Number of concurrent fetch workers (1 = sequential, default).
     :return: A set of unique email addresses found during the scraping process.
     """
     urls_to_process = deque([start_url])
@@ -209,6 +182,7 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
     rate_limiter = RateLimiter(min_request_interval) if min_request_interval > 0 else None
     max_retries = max(1, int(max_retries))
     backoff_factor = max(0.1, float(backoff_factor))
+    concurrency = max(1, int(concurrency))
 
     last_fetch_time: Optional[float] = None
     last_parse_time: Optional[float] = None
@@ -273,25 +247,92 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
     try:
         check_cancelled()
 
+        def handle_result(url: str, emails: set[str], links: list[str],
+                          fetch_time: float, parse_time: float):
+            nonlocal last_fetch_time, last_parse_time, total_fetch_time, total_parse_time
+            nonlocal fetch_sample_count, parse_sample_count
+            nonlocal max_fetch_time, max_parse_time, min_fetch_time, min_parse_time
+            # verbose timings
+            if verbose:
+                print(f'    Fetch: {fetch_time:.3f}s Parse: {parse_time:.3f}s')
+            newly_discovered = set()
+            if emails:
+                newly_discovered = emails - collected_emails
+                new_emails_for_file = newly_discovered - written_emails
+                if new_emails_for_file and output_file:
+                    with email_lock:
+                        really_new = new_emails_for_file - written_emails
+                        if really_new:
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                for e in sorted(really_new):
+                                    f.write(e + '\n')
+                            written_emails.update(really_new)
+                            print(f'[+] Appended {len(really_new)} new emails to {output_file}')
+            collected_emails.update(emails)
+            base_url = get_base_url(url)
+            for link in links:
+                if stay_in_domain and not link.startswith(base_url):
+                    continue
+                if exclude_strs and any(excl in link for excl in exclude_strs):
+                    continue
+                if link not in scraped_urls and link not in urls_to_process:
+                    urls_to_process.append(link)
+            # metrics
+            last_fetch_time = fetch_time
+            last_parse_time = parse_time
+            total_fetch_time += fetch_time
+            total_parse_time += parse_time
+            fetch_sample_count += 1
+            parse_sample_count += 1
+            max_fetch_time = fetch_time if max_fetch_time is None else max(max_fetch_time, fetch_time)
+            max_parse_time = parse_time if max_parse_time is None else max(max_parse_time, parse_time)
+            min_fetch_time = fetch_time if min_fetch_time is None else min(min_fetch_time, fetch_time)
+            min_parse_time = parse_time if min_parse_time is None else min(min_parse_time, parse_time)
+            emit_progress('running', current_url=url, new_emails=newly_discovered)
+
         while urls_to_process and count < max_count:
             check_cancelled()
-
-            # Process multiple URLs concurrently
-            batch_size = min(5, len(urls_to_process), max_count - count)
+            if concurrency == 1:
+                # SEQUENTIAL path
+                url = urls_to_process.popleft()
+                if url in scraped_urls:
+                    continue
+                scraped_urls.add(url)
+                count += 1
+                print(f'[{count}] Processing {url}')
+                try:
+                    emails, links, fetch_time, parse_time = process_single_url(
+                        session,
+                        url,
+                        timeout=timeout,
+                        limiter=rate_limiter,
+                        max_retries=max_retries,
+                        backoff_factor=backoff_factor,
+                        cancellation_event=cancellation_event,
+                    )
+                    check_cancelled(current_url=url)
+                except ScrapeCancelled:
+                    notify_cancelled(current_url=url)
+                    raise
+                except Exception as e:
+                    print(f'Error processing {url}: {e}')
+                    emit_progress('error', current_url=url, new_emails=set(), message=str(e))
+                    continue
+                handle_result(url, emails, links, fetch_time, parse_time)
+                continue  # next loop iteration
+            # CONCURRENT path
+            batch_size = min(concurrency, len(urls_to_process), max_count - count)
             current_batch = []
-
             for _ in range(batch_size):
-                if urls_to_process:
-                    url = urls_to_process.popleft()
-                    if url not in scraped_urls:
-                        current_batch.append(url)
-                        scraped_urls.add(url)
-
+                if not urls_to_process:
+                    break
+                next_url = urls_to_process.popleft()
+                if next_url not in scraped_urls:
+                    current_batch.append(next_url)
+                    scraped_urls.add(next_url)
             if not current_batch:
                 continue
-
-            # Process batch concurrently
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
                 future_to_url = {
                     executor.submit(
                         process_single_url,
@@ -305,12 +346,10 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
                     ): url
                     for url in current_batch
                 }
-
                 for future in concurrent.futures.as_completed(future_to_url):
                     url = future_to_url[future]
                     count += 1
                     print(f'[{count}] Processing {url}')
-
                     try:
                         check_cancelled(current_url=url)
                         emails, links, fetch_time, parse_time = future.result(timeout=10)
@@ -323,48 +362,7 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
                         print(f'Error processing {url}: {e}')
                         emit_progress('error', current_url=url, new_emails=set(), message=str(e))
                         continue
-
-                    if verbose:
-                        print(f'    Fetch: {fetch_time:.3f}s Parse: {parse_time:.3f}s')
-                    # write only truly new emails
-                    newly_discovered = set()
-                    if emails:
-                        newly_discovered = emails - collected_emails
-                        new_emails_for_file = newly_discovered - written_emails
-                        if new_emails_for_file and output_file:
-                            with email_lock:
-                                # re-check after acquiring lock
-                                really_new = new_emails_for_file - written_emails
-                                if really_new:
-                                    with open(output_file, 'a', encoding='utf-8') as f:
-                                        for e in sorted(really_new):
-                                            f.write(e + '\n')
-                                    written_emails.update(really_new)
-                                    print(f'[+] Appended {len(really_new)} new emails to {output_file}')
-                    collected_emails.update(emails)
-
-                    base_url = get_base_url(url)
-                    for link in links:
-                        if stay_in_domain and not link.startswith(base_url):
-                            continue
-                        if exclude_strs and any(excl in link for excl in exclude_strs):
-                            continue
-                        if link not in scraped_urls and link not in urls_to_process:
-                            urls_to_process.append(link)
-
-                    last_fetch_time = fetch_time
-                    last_parse_time = parse_time
-                    total_fetch_time += fetch_time
-                    total_parse_time += parse_time
-                    fetch_sample_count += 1
-                    parse_sample_count += 1
-                    max_fetch_time = fetch_time if max_fetch_time is None else max(max_fetch_time, fetch_time)
-                    max_parse_time = parse_time if max_parse_time is None else max(max_parse_time, parse_time)
-                    min_fetch_time = fetch_time if min_fetch_time is None else min(min_fetch_time, fetch_time)
-                    min_parse_time = parse_time if min_parse_time is None else min(min_parse_time, parse_time)
-
-                    emit_progress('running', current_url=url, new_emails=newly_discovered)
-
+                    handle_result(url, emails, links, fetch_time, parse_time)
         if progress_callback and not cancelled_notified:
             emit_progress('finished', current_url=None)
         return collected_emails
@@ -444,15 +442,19 @@ def process_single_url(session, url, timeout=10.0, limiter: Optional[RateLimiter
         t1 = perf_counter()
         emails = extract_emails(response.text)
         soup = BeautifulSoup(response.text, 'lxml')
-        base_url = get_base_url(url)
-        page_path = get_page_path(url)
         links = []
         for anchor in soup.find_all('a', href=True):
-            link = anchor['href']
-            if any(ext in link.lower() for ext in ['.pdf', '.jpg', '.png', '.gif', '.zip', '.doc']):
+            link = anchor['href'].strip()
+            if not link:
                 continue
-            normalized_link = normalize_link(link, base_url, page_path)
-            links.append(normalized_link)
+            lower_link = link.lower()
+            if lower_link.startswith(('javascript:', 'mailto:', '#')):
+                continue
+            if any(ext in lower_link for ext in ['.pdf', '.jpg', '.png', '.gif', '.zip', '.doc']):
+                continue
+            normalized_link = urllib.parse.urljoin(url, link)
+            if normalized_link:
+                links.append(normalized_link)
         parse_time = perf_counter() - t1
         check_cancelled()
         return emails, links, fetch_time, parse_time
@@ -498,6 +500,8 @@ def main():
                         help='Maximum retries for transient HTTP errors such as 429 (default: 3)')
     parser.add_argument('--backoff-factor', type=float, default=1.5,
                         help='Multiplier used for exponential backoff when retrying (default: 1.5)')
+    parser.add_argument('--concurrency', type=int, default=1,
+                        help='Number of concurrent workers (default: 1 = sequential)')
 
     args = parser.parse_args()
 
@@ -521,6 +525,7 @@ def main():
     print(f'[+] Min interval between requests: {min_interval:.2f} seconds')
     print(f'[+] Max retries per URL: {max_retries}')
     print(f'[+] Backoff factor: {backoff_factor:.2f}')
+    print(f'[+] Concurrency: {args.concurrency} ({"sequential" if args.concurrency <= 1 else "parallel"})')
     print(f'[+] Emails will be appended to: {args.output}\n')
 
     try:
@@ -535,6 +540,7 @@ def main():
             min_request_interval=min_interval,
             max_retries=max_retries,
             backoff_factor=backoff_factor,
+            concurrency=args.concurrency,
         )
 
         print('\n[+] Finished scraping!')

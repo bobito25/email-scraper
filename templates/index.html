@@ -348,6 +348,86 @@
             background: rgba(255, 255, 255, 0.06);
         }
 
+        .email-entry {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .email-address {
+            flex: 1;
+            min-width: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: inherit;
+        }
+
+        .email-address a {
+            color: inherit;
+        }
+
+        .email-address a,
+        .email-address span {
+            display: inline-block;
+            max-width: 100%;
+            word-break: break-all;
+        }
+
+        .icon-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            height: 36px;
+            width: 36px;
+            border-radius: 12px;
+            border: 1px solid var(--panel-border);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+            transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        }
+
+        .icon-button svg {
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+        }
+
+        .icon-button:hover {
+            transform: translateY(-1px);
+            background: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.28);
+        }
+
+        .icon-button:focus-visible {
+            outline: 2px solid rgba(255, 255, 255, 0.45);
+            outline-offset: 2px;
+        }
+
+        .copy-button.copied {
+            background: rgba(60, 179, 113, 0.28);
+            border-color: rgba(60, 179, 113, 0.6);
+            color: #d8ffe2;
+        }
+
+        .copy-button.copy-error {
+            background: rgba(217, 83, 79, 0.28);
+            border-color: rgba(217, 83, 79, 0.6);
+            color: #ffe2e0;
+        }
+
+        .result-panel a {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 500;
+            word-break: break-all;
+        }
+
+        .result-panel a:hover,
+        .result-panel a:focus {
+            text-decoration: underline;
+        }
+
         .result-panel .empty-message {
             margin: 0;
             color: var(--text-muted);
@@ -634,7 +714,18 @@
                     <ul id="valid-email-list">
                         {% if job and job.valid_emails %}
                             {% for email in job.valid_emails %}
-                                <li>{{ email }}</li>
+                                {% set sources = job.email_sources.get(email, []) if job.email_sources else [] %}
+                                {% set primary = sources[0] if sources else None %}
+                                <li>
+                                    {% if primary %}
+                                        <a href="{{ primary }}" target="_blank" rel="noopener noreferrer"
+                                           title="{% if sources|length > 1 %}Also found on: {{ sources[1:]|join(', ') }}{% else %}{{ primary }}{% endif %}">
+                                            {{ email }}
+                                        </a>
+                                    {% else %}
+                                        {{ email }}
+                                    {% endif %}
+                                </li>
                             {% endfor %}
                         {% endif %}
                     </ul>
@@ -646,7 +737,18 @@
                     <ul id="invalid-email-list">
                         {% if job and job.invalid_emails %}
                             {% for email in job.invalid_emails %}
-                                <li>{{ email }}</li>
+                                {% set sources = job.email_sources.get(email, []) if job.email_sources else [] %}
+                                {% set primary = sources[0] if sources else None %}
+                                <li>
+                                    {% if primary %}
+                                        <a href="{{ primary }}" target="_blank" rel="noopener noreferrer"
+                                           title="{% if sources|length > 1 %}Also found on: {{ sources[1:]|join(', ') }}{% else %}{{ primary }}{% endif %}">
+                                            {{ email }}
+                                        </a>
+                                    {% else %}
+                                        {{ email }}
+                                    {% endif %}
+                                </li>
                             {% endfor %}
                         {% endif %}
                     </ul>
@@ -698,6 +800,11 @@
             const timingMaxParse = document.getElementById("timing-max-parse");
             const errorSummary = document.getElementById("job-errors-summary");
             const errorDetails = document.getElementById("job-errors-details");
+            const copyIconMarkup = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1Zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H8V7h11v14Z" /></svg>';
+            const checkIconMarkup = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.285 6.707a1 1 0 0 0-1.414-1.414L9 15.164l-3.871-3.879a1 1 0 1 0-1.414 1.414l4.578 4.59a1 1 0 0 0 1.414 0l10.578-10.582Z" /></svg>';
+            const errorIconMarkup = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11.001 10h2v5h-2zm0 7h2v2h-2z"/><path d="M21 19H3c-.77 0-1.47-.434-1.813-1.123-.344-.69-.285-1.509.153-2.144l9-13.003c.758-1.096 2.563-1.096 3.32 0l9 13.003c.438.635.497 1.454.153 2.144C22.47 18.566 21.77 19 21 19z"/></svg>';
+            const COPY_RESET_DELAY = 2200;
+            const ERROR_RESET_DELAY = 2600;
 
             if (panel) {
                 panel.hidden = false;
@@ -707,6 +814,18 @@
             const POLL_INTERVAL = 4000;
             let retryDelay = POLL_INTERVAL;
             let cancelRequestInFlight = false;
+
+            const normalizeJobState = (job) => {
+                if (!job || typeof job !== "object") {
+                    return job;
+                }
+                if (!job.email_sources || typeof job.email_sources !== "object") {
+                    job.email_sources = {};
+                }
+                return job;
+            };
+
+            jobState = normalizeJobState(jobState);
 
             const updateCancelButton = (job) => {
                 if (!cancelButton) {
@@ -751,6 +870,7 @@
                                 ...jobState,
                                 ...data,
                             };
+                            jobState = normalizeJobState(jobState);
                         }
                         if (jobState) {
                             jobState.cancel_requested = true;
@@ -769,6 +889,80 @@
                 event.preventDefault();
                 triggerCancel();
             });
+
+            const copyToClipboard = async (value) => {
+                if (typeof value !== "string" || !value.trim().length) {
+                    throw new Error("Invalid clipboard value");
+                }
+                if (navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(value);
+                    return;
+                }
+                return new Promise((resolve, reject) => {
+                    try {
+                        const textarea = document.createElement("textarea");
+                        textarea.value = value;
+                        textarea.setAttribute("readonly", "readonly");
+                        textarea.style.position = "fixed";
+                        textarea.style.top = "-1000px";
+                        document.body.append(textarea);
+                        textarea.select();
+                        const result = document.execCommand("copy");
+                        textarea.remove();
+                        if (!result) {
+                            reject(new Error("Copy command was rejected"));
+                        } else {
+                            resolve();
+                        }
+                    } catch (error) {
+                        reject(error instanceof Error ? error : new Error("Copy failed"));
+                    }
+                });
+            };
+
+            const resetCopyButton = (button) => {
+                if (!button) return;
+                button.classList.remove("copied", "copy-error");
+                button.innerHTML = copyIconMarkup;
+                const email = button.dataset.email ?? "email";
+                button.setAttribute("aria-label", `Copy ${email}`);
+            };
+
+            const scheduleReset = (button, delay) => {
+                if (!button) return;
+                if (button._copyResetTimer) {
+                    clearTimeout(button._copyResetTimer);
+                }
+                button._copyResetTimer = setTimeout(() => {
+                    resetCopyButton(button);
+                    button._copyResetTimer = null;
+                }, delay);
+            };
+
+            const handleCopy = (email, button) => {
+                if (!button) return;
+                const targetEmail = email ?? button.dataset.email;
+                if (!targetEmail) return;
+                button.dataset.email = targetEmail;
+                button.classList.remove("copy-error");
+                button.innerHTML = copyIconMarkup;
+                button.setAttribute("aria-label", `Copy ${targetEmail}`);
+                copyToClipboard(targetEmail)
+                    .then(() => {
+                        button.classList.add("copied");
+                        button.classList.remove("copy-error");
+                        button.innerHTML = checkIconMarkup;
+                        button.setAttribute("aria-label", `Copied ${targetEmail}`);
+                        scheduleReset(button, COPY_RESET_DELAY);
+                    })
+                    .catch(() => {
+                        button.classList.remove("copied");
+                        button.classList.add("copy-error");
+                        button.innerHTML = errorIconMarkup;
+                        button.setAttribute("aria-label", `Copy failed for ${targetEmail}`);
+                        scheduleReset(button, ERROR_RESET_DELAY);
+                    });
+            };
 
             const formatSeconds = (value) => {
                 if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
@@ -795,14 +989,60 @@
                 element.textContent = formatted ?? "—";
             };
 
-            const renderEmails = (listEl, emptyEl, emails) => {
+            const renderEmails = (listEl, emptyEl, emails, job) => {
                 if (!listEl || !emptyEl) return;
                 listEl.replaceChildren();
                 const items = Array.isArray(emails) ? emails : [];
+                const emailSources = (job && typeof job === "object" && job.email_sources && typeof job.email_sources === "object")
+                    ? job.email_sources
+                    : {};
+                const fallbackSource = (job && typeof job.source_url === "string") ? job.source_url : null;
                 if (items.length) {
                     items.forEach((email) => {
                         const li = document.createElement("li");
-                        li.textContent = email;
+                        li.className = "email-entry";
+
+                        const wrapper = document.createElement("span");
+                        wrapper.className = "email-address";
+                        const sourcesRaw = emailSources[email];
+                        const sourceList = Array.isArray(sourcesRaw)
+                            ? sourcesRaw.filter((value) => typeof value === "string" && value.trim().length)
+                            : [];
+                        const uniqueSources = Array.from(new Set(sourceList));
+                        let primarySource = uniqueSources[0] ?? null;
+                        if (!primarySource && typeof fallbackSource === "string" && fallbackSource.trim().length) {
+                            primarySource = fallbackSource;
+                        }
+
+                        if (primarySource) {
+                            const link = document.createElement("a");
+                            link.href = primarySource;
+                            link.target = "_blank";
+                            link.rel = "noopener noreferrer";
+                            link.textContent = email;
+                            if (uniqueSources.length > 1) {
+                                link.title = `Also found on: ${uniqueSources.slice(1).join(", ")}`;
+                            } else {
+                                link.title = primarySource;
+                            }
+                            wrapper.append(link);
+                        } else {
+                            const textSpan = document.createElement("span");
+                            textSpan.textContent = email;
+                            wrapper.append(textSpan);
+                        }
+
+                        li.append(wrapper);
+
+                        const copyButton = document.createElement("button");
+                        copyButton.type = "button";
+                        copyButton.className = "icon-button copy-button";
+                        copyButton.dataset.email = email;
+                        copyButton.setAttribute("aria-label", `Copy ${email}`);
+                        copyButton.innerHTML = copyIconMarkup;
+                        copyButton.addEventListener("click", () => handleCopy(email, copyButton));
+                        li.append(copyButton);
+
                         listEl.append(li);
                     });
                     listEl.hidden = false;
@@ -1003,8 +1243,8 @@
                     }
                 }
 
-                renderEmails(validList, validEmpty, job.valid_emails);
-                renderEmails(invalidList, invalidEmpty, job.invalid_emails);
+                renderEmails(validList, validEmpty, job.valid_emails, job);
+                renderEmails(invalidList, invalidEmpty, job.invalid_emails, job);
                 renderErrors(job.errors, job.error_summary);
                 updateCancelButton(job);
             };
@@ -1018,7 +1258,7 @@
                         return response.json();
                     })
                     .then((data) => {
-                        jobState = data;
+                        jobState = normalizeJobState(data);
                         render(jobState);
                         if (DONE_STATUSES.has(jobState.status)) {
                             return;

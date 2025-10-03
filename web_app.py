@@ -64,6 +64,7 @@ class ScrapeJob:
 	raw_emails: set[str] = field(default_factory=set, repr=False)
 	valid_emails: set[str] = field(default_factory=set, repr=False)
 	invalid_emails: set[str] = field(default_factory=set, repr=False)
+	email_sources: dict[str, set[str]] = field(default_factory=dict, repr=False)
 	started_at: Optional[float] = None
 	finished_at: Optional[float] = None
 	last_update: Optional[float] = None
@@ -117,6 +118,12 @@ class ScrapeJob:
 				valid, invalid = filter_valid_emails(new_batch)
 				self.valid_emails.update(valid)
 				self.invalid_emails.update(invalid)
+				source_url = progress.current_url or self.source_url
+				if source_url:
+					for email in valid:
+						self.email_sources.setdefault(email, set()).add(source_url)
+					for email in invalid:
+						self.email_sources.setdefault(email, set()).add(source_url)
 			if progress.status == "finished":
 				self.finished_at = now
 			elif progress.status == "cancelled":
@@ -133,6 +140,12 @@ class ScrapeJob:
 			self.valid_emails = set(valid)
 			self.invalid_emails = set(invalid)
 			self.unique_emails = len(emails)
+			fallback_source = self.source_url
+			if fallback_source:
+				for email in self.valid_emails:
+					self.email_sources.setdefault(email, set()).add(fallback_source)
+				for email in self.invalid_emails:
+					self.email_sources.setdefault(email, set()).add(fallback_source)
 			if self.status not in {"failed", "cancelled"}:
 				self.status = "finished"
 			self.finished_at = now
@@ -189,6 +202,10 @@ class ScrapeJob:
 				"error_summary": self._build_error_summary_locked(),
 				"valid_emails": sorted(self.valid_emails),
 				"invalid_emails": sorted(self.invalid_emails),
+				"email_sources": {
+					email: sorted(sources)
+					for email, sources in self.email_sources.items()
+				},
 				"started_at": self.started_at,
 				"finished_at": self.finished_at,
 				"last_update": self.last_update,

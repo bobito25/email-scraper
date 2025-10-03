@@ -32,6 +32,22 @@ def normalize_url(user_input: str) -> str:
 	return user_input
 
 
+def serialize_component_stats(raw_stats: dict[str, Any]) -> dict[str, dict[str, int]]:
+	serialized: dict[str, dict[str, int]] = {}
+	for component, summary in raw_stats.items():
+		url_count = getattr(summary, "url_count", None)
+		email_count = getattr(summary, "email_count", None)
+		if url_count is None and isinstance(summary, dict):
+			url_count = summary.get("url_count", 0)
+		if email_count is None and isinstance(summary, dict):
+			email_count = summary.get("email_count", 0)
+		serialized[component] = {
+			"url_count": int(url_count or 0),
+			"email_count": int(email_count or 0),
+		}
+	return serialized
+
+
 @dataclass(slots=True)
 class JobError:
 	message: str
@@ -66,6 +82,7 @@ class ScrapeJob:
 	valid_emails: set[str] = field(default_factory=set, repr=False)
 	invalid_emails: set[str] = field(default_factory=set, repr=False)
 	email_sources: dict[str, set[str]] = field(default_factory=dict, repr=False)
+	path_component_stats: dict[str, dict[str, int]] = field(default_factory=dict)
 	started_at: Optional[float] = None
 	finished_at: Optional[float] = None
 	last_update: Optional[float] = None
@@ -111,6 +128,7 @@ class ScrapeJob:
 			self.total_parse_time = progress.total_parse_time
 			self.fetch_sample_count = progress.fetch_sample_count
 			self.parse_sample_count = progress.parse_sample_count
+			self.path_component_stats = serialize_component_stats(progress.path_component_stats)
 			if progress.status == "error" and progress.message:
 				self._append_error(progress.message, progress.current_url)
 			if progress.new_emails:
@@ -133,7 +151,7 @@ class ScrapeJob:
 				if progress.message:
 					self._append_error(progress.message, progress.current_url)
 
-	def finalize(self, emails: set[str]) -> None:
+	def finalize(self, emails: set[str], component_stats: Optional[dict[str, Any]] = None) -> None:
 		valid, invalid = filter_valid_emails(emails)
 		now = time.time()
 		with self._lock:
@@ -147,6 +165,8 @@ class ScrapeJob:
 					self.email_sources.setdefault(email, set()).add(fallback_source)
 				for email in self.invalid_emails:
 					self.email_sources.setdefault(email, set()).add(fallback_source)
+			if component_stats is not None:
+				self.path_component_stats = serialize_component_stats(component_stats)
 			if self.status not in {"failed", "cancelled"}:
 				self.status = "finished"
 			self.finished_at = now
@@ -207,6 +227,10 @@ class ScrapeJob:
 				"email_sources": {
 					email: sorted(sources)
 					for email, sources in self.email_sources.items()
+				},
+				"path_component_stats": {
+					component: dict(stats)
+					for component, stats in self.path_component_stats.items()
 				},
 				"started_at": self.started_at,
 				"finished_at": self.finished_at,
@@ -274,7 +298,7 @@ def get_job(job_id: str) -> Optional[ScrapeJob]:
 
 def execute_job(job: ScrapeJob) -> None:
 	try:
-		emails = scrape_website(
+		result = scrape_website(
 			job.source_url,
 			max_count=job.max_pages,
 			stay_in_domain=job.stay_in_domain,
@@ -285,7 +309,7 @@ def execute_job(job: ScrapeJob) -> None:
 			cancellation_event=job.cancel_event,
 			concurrency=job.concurrency,
 		)
-		job.finalize(emails)
+		job.finalize(result.emails, result.path_component_stats)
 	except ScrapeCancelled:
 		job.mark_cancelled()
 	except Exception as exc:  # pragma: no cover - bubbled to UI via job errors

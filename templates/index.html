@@ -311,7 +311,7 @@
         .results-grid {
             display: grid;
             gap: 20px;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
         .result-panel {
@@ -322,6 +322,10 @@
             display: flex;
             flex-direction: column;
             gap: 16px;
+        }
+
+        #component-stats-panel {
+            grid-column: 1 / -1;
         }
 
         .result-panel h3 {
@@ -346,6 +350,57 @@
             padding: 10px 12px;
             border-radius: 12px;
             background: rgba(255, 255, 255, 0.06);
+        }
+
+        .component-stat-list {
+            display: grid;
+            gap: 10px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .component-stat-item {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.06);
+            font-family: "Inter", monospace;
+        }
+
+        .component-stat-name {
+            font-weight: 600;
+            word-break: break-all;
+        }
+
+        .component-stat-metrics {
+            display: flex;
+            gap: 16px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .component-stat-metrics span {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 4px;
+        }
+
+        .component-stat-metrics strong {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .component-stat-item.zero-emails {
+            background: rgba(217, 83, 79, 0.18);
+            color: #ffe2e0;
+        }
+
+        .component-stat-item.zero-emails .component-stat-metrics strong {
+            color: #ffe2e0;
         }
 
         .email-entry {
@@ -535,6 +590,11 @@
 
             .app-panel {
                 border-radius: 22px;
+            }
+        }
+        @media (max-width: 720px) {
+            .results-grid {
+                grid-template-columns: 1fr;
             }
         }
     </style>
@@ -768,6 +828,13 @@
                     </ul>
                     <p class="empty-message" id="invalid-empty" {% if job and job.invalid_emails %}hidden{% endif %}>No invalid emails detected.</p>
                 </div>
+
+                <div class="result-panel" id="component-stats-panel">
+                    <h3>Path components</h3>
+                    <ul class="component-stat-list" id="component-stats-list"></ul>
+                    <p class="empty-message" id="component-stats-empty">No path component stats yet.</p>
+                    <p class="help-text" id="component-stats-help">Most frequent path segments are listed; entries with zero collected emails are highlighted.</p>
+                </div>
             </div>
         </section>
     </div>
@@ -805,6 +872,10 @@
             const invalidList = document.getElementById("invalid-email-list");
             const validEmpty = document.getElementById("valid-empty");
             const invalidEmpty = document.getElementById("invalid-empty");
+            const componentStatsPanel = document.getElementById("component-stats-panel");
+            const componentStatsList = document.getElementById("component-stats-list");
+            const componentStatsEmpty = document.getElementById("component-stats-empty");
+            const componentStatsHelp = document.getElementById("component-stats-help");
             const errorBox = document.getElementById("job-errors");
             const errorList = document.getElementById("job-errors-list");
             const timingLastFetch = document.getElementById("timing-last-fetch");
@@ -839,6 +910,9 @@
                 }
                 if (!job.form_values || typeof job.form_values !== "object") {
                     job.form_values = {};
+                }
+                if (!job.path_component_stats || typeof job.path_component_stats !== "object") {
+                    job.path_component_stats = {};
                 }
                 return job;
             };
@@ -1182,6 +1256,86 @@
                 });
             };
 
+            const renderComponentStats = (stats) => {
+                if (!componentStatsPanel || !componentStatsList || !componentStatsEmpty) {
+                    return;
+                }
+
+                const entries = (stats && typeof stats === "object")
+                    ? Object.entries(stats)
+                        .map(([segment, summary]) => {
+                            const urlCountRaw = summary && typeof summary === "object"
+                                ? (summary.url_count ?? summary.urlCount ?? 0)
+                                : 0;
+                            const emailCountRaw = summary && typeof summary === "object"
+                                ? (summary.email_count ?? summary.emailCount ?? 0)
+                                : 0;
+                            const urlCount = Number.isFinite(Number(urlCountRaw)) ? Number(urlCountRaw) : 0;
+                            const emailCount = Number.isFinite(Number(emailCountRaw)) ? Number(emailCountRaw) : 0;
+                            const ratio = urlCount > 0 ? emailCount / urlCount : 0;
+                            return { segment, urlCount, emailCount, ratio };
+                        })
+                        .filter((entry) => entry.segment.trim().length > 0)
+                    : [];
+
+                entries.sort((a, b) => {
+                    if (b.urlCount !== a.urlCount) return b.urlCount - a.urlCount;
+                    if (b.emailCount !== a.emailCount) return b.emailCount - a.emailCount;
+                    return a.segment.localeCompare(b.segment);
+                });
+
+                componentStatsList.replaceChildren();
+
+                if (!entries.length) {
+                    componentStatsList.hidden = true;
+                    componentStatsEmpty.hidden = false;
+                    if (componentStatsHelp) componentStatsHelp.hidden = true;
+                    componentStatsPanel.hidden = false;
+                    return;
+                }
+
+                const limitedEntries = entries.slice(0, 15);
+                limitedEntries.forEach((entry) => {
+                    const item = document.createElement("li");
+                    item.className = "component-stat-item";
+                    if (entry.emailCount === 0) {
+                        item.classList.add("zero-emails");
+                    }
+
+                    const nameSpan = document.createElement("span");
+                    nameSpan.className = "component-stat-name";
+                    nameSpan.textContent = `/${entry.segment}`;
+
+                    const metrics = document.createElement("div");
+                    metrics.className = "component-stat-metrics";
+
+                    const urlsMetric = document.createElement("span");
+                    const urlsStrong = document.createElement("strong");
+                    urlsStrong.textContent = entry.urlCount.toString();
+                    urlsMetric.append(urlsStrong, " URLs");
+
+                    const emailsMetric = document.createElement("span");
+                    const emailsStrong = document.createElement("strong");
+                    emailsStrong.textContent = entry.emailCount.toString();
+                    emailsMetric.append(emailsStrong, " emails");
+
+                    const ratioMetric = document.createElement("span");
+                    const ratioStrong = document.createElement("strong");
+                    ratioStrong.textContent = entry.urlCount > 0 ? entry.ratio.toFixed(2) : "0.00";
+                    ratioMetric.append(ratioStrong, " per URL");
+
+                    metrics.append(urlsMetric, emailsMetric, ratioMetric);
+
+                    item.append(nameSpan, metrics);
+                    componentStatsList.append(item);
+                });
+
+                componentStatsList.hidden = false;
+                componentStatsEmpty.hidden = true;
+                if (componentStatsHelp) componentStatsHelp.hidden = false;
+                componentStatsPanel.hidden = false;
+            };
+
             const formatStatus = (status) => {
                 switch (status) {
                     case "finished":
@@ -1273,6 +1427,7 @@
                 renderEmails(validList, validEmpty, job.valid_emails, job);
                 renderEmails(invalidList, invalidEmpty, job.invalid_emails, job);
                 renderErrors(job.errors, job.error_summary);
+                renderComponentStats(job.path_component_stats);
                 updateCancelButton(job);
             };
 

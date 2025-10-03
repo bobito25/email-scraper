@@ -3,7 +3,7 @@ import concurrent.futures
 import urllib.parse
 import re
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Literal, Optional
@@ -48,6 +48,12 @@ class ScrapeCancelled(Exception):
     pass
 
 
+@dataclass(slots=True, frozen=True)
+class PathComponentSummary:
+    url_count: int
+    email_count: int
+
+
 @dataclass(slots=True)
 class ScrapeProgress:
     status: ScrapeStatus
@@ -70,9 +76,16 @@ class ScrapeProgress:
     total_parse_time: float = 0.0
     fetch_sample_count: int = 0
     parse_sample_count: int = 0
+    path_component_stats: dict[str, PathComponentSummary] = field(default_factory=dict)
 
 
 ProgressCallback = Callable[[ScrapeProgress], None]
+
+
+@dataclass(slots=True)
+class ScrapeResult:
+    emails: set[str]
+    path_component_stats: dict[str, PathComponentSummary]
 
 
 class RateLimiter:
@@ -143,7 +156,7 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
                    min_request_interval: float = 0.5, max_retries: int = 3,
                    backoff_factor: float = 1.5,
                    cancellation_event: Optional[threading.Event] = None,
-                   concurrency: int = 1) -> set[str]:
+                   concurrency: int = 1) -> ScrapeResult:
     """
     Scrapes a website starting from the given URL, follows links, and collects email addresses.
     Optionally appends newly found (deduplicated) emails to an output file in a thread-safe way.
@@ -161,12 +174,14 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
     :param backoff_factor: Multiplier used when calculating exponential backoff delays (default: 1.5).
     :param cancellation_event: Optional event used to cancel the scraping process.
     :param concurrency: Number of concurrent fetch workers (1 = sequential, default).
-    :return: A set of unique email addresses found during the scraping process.
+    :return: A ScrapeResult containing the unique email addresses found and
+        aggregated statistics for each path component encountered.
     """
     urls_to_process = deque([start_url])
     scraped_urls = set()
     collected_emails = set()
     count = 0
+    component_stats: dict[str, dict[str, int]] = {}
     # thread-safe email recording
     email_lock = threading.Lock()
     written_emails = set()
@@ -197,6 +212,17 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
 
     cancelled_notified = False
 
+    def snapshot_component_stats() -> dict[str, PathComponentSummary]:
+        if not component_stats:
+            return {}
+        return {
+            component: PathComponentSummary(
+                url_count=stats['url_count'],
+                email_count=stats['email_count'],
+            )
+            for component, stats in component_stats.items()
+        }
+
     def emit_progress(status: ScrapeStatus, *, current_url: Optional[str], new_emails: Optional[set[str]] = None,
                       message: Optional[str] = None):
         if not progress_callback:
@@ -226,6 +252,7 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
                 total_parse_time=total_parse_time,
                 fetch_sample_count=fetch_sample_count,
                 parse_sample_count=parse_sample_count,
+                path_component_stats=snapshot_component_stats(),
             )
         )
 
@@ -288,6 +315,15 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
             max_parse_time = parse_time if max_parse_time is None else max(max_parse_time, parse_time)
             min_fetch_time = fetch_time if min_fetch_time is None else min(min_fetch_time, fetch_time)
             min_parse_time = parse_time if min_parse_time is None else min(min_parse_time, parse_time)
+            # update path component stats
+            parsed_url = urllib.parse.urlsplit(url)
+            components = [segment for segment in parsed_url.path.split('/') if segment]
+            if components:
+                email_count_for_url = len(emails)
+                for component in set(components):
+                    stats_entry = component_stats.setdefault(component, {'url_count': 0, 'email_count': 0})
+                    stats_entry['url_count'] += 1
+                    stats_entry['email_count'] += email_count_for_url
             emit_progress('running', current_url=url, new_emails=newly_discovered)
 
         while urls_to_process and count < max_count:
@@ -365,7 +401,10 @@ def scrape_website(start_url: str, max_count: int = 100, stay_in_domain: bool = 
                     handle_result(url, emails, links, fetch_time, parse_time)
         if progress_callback and not cancelled_notified:
             emit_progress('finished', current_url=None)
-        return collected_emails
+        return ScrapeResult(
+            emails=collected_emails,
+            path_component_stats=snapshot_component_stats(),
+        )
     except ScrapeCancelled:
         raise
     finally:
@@ -529,7 +568,7 @@ def main():
     print(f'[+] Emails will be appended to: {args.output}\n')
 
     try:
-        emails = scrape_website(
+        result = scrape_website(
             user_url,
             max_count=args.max_count,
             stay_in_domain=stay_in_domain,
@@ -542,6 +581,8 @@ def main():
             backoff_factor=backoff_factor,
             concurrency=args.concurrency,
         )
+        emails = result.emails
+        component_stats = result.path_component_stats
 
         print('\n[+] Finished scraping!')
 
@@ -557,6 +598,23 @@ def main():
         print(f'\n[+] Total emails found: {len(emails)}')
     else:
         print('[-] No emails found.')
+
+    if component_stats:
+        print('\n[+] Path component stats (top 10 by pages scanned):')
+        top_components = sorted(
+            component_stats.items(),
+            key=lambda item: item[1].url_count,
+            reverse=True,
+        )[:10]
+        for component, stats in top_components:
+            print(f'    {component}: {stats.url_count} pages, {stats.email_count} emails')
+        zero_email_components = [
+            component for component, stats in top_components if stats.email_count == 0
+        ]
+        if zero_email_components:
+            print('    Components with zero collected emails in this sample:')
+            for component in zero_email_components:
+                print(f'        - {component}')
 
 
 if __name__ == '__main__':

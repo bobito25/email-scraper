@@ -3,7 +3,7 @@
 A Python-based tool that scrapes websites to collect email addresses. Given a starting URL, this tool will recursively follow links found on the page and extract email addresses from all visited pages.
 
 ## TODOs
-- Prefix tree for repeated paths -> recomendations to avoid (ex.: collections/products)
+- Save common "bad" path components for use over several runs
 
 ## Features
 - **Recursive scraping**: Follows links on the web pages to visit multiple pages for a thorough search.
